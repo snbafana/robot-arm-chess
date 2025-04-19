@@ -1,8 +1,8 @@
 # Ignore captures directory and its contents
 captures/
-*.jpg
-*.jpeg
-*.png
+# *.jpg
+# *.jpeg
+# *.png
 
 # Python
 __pycache__/
