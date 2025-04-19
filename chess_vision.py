@@ -8,12 +8,13 @@ import cv2, base64, os, sys, json
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Literal, Dict, List, Tuple
+from typing import Optional, Literal, Dict, List, Tuple, Union
 from pydantic import BaseModel, Field
 from openai import OpenAI
 from google import genai
 import instructor
 from dotenv import load_dotenv
+from calibrate_board import calibrate_from_camera, load_config, apply_transform
 
 # Setup
 load_dotenv()
@@ -147,12 +148,20 @@ def perspective_transform(image: np.ndarray, corners: np.ndarray) -> np.ndarray:
     
     return warped
 
-def preprocess_board_image(image_path: str, output_path: str = None) -> Tuple[bool, np.ndarray]:
-    """Preprocess chess board image to get aligned top-down view."""
-    # Read image
-    image = cv2.imread(image_path)
-    if image is None:
-        return False, None
+def preprocess_board_image(image_input: Union[str, np.ndarray], output_path: str = None) -> Tuple[bool, np.ndarray]:
+    """Preprocess chess board image to get aligned top-down view.
+    
+    Args:
+        image_input: Either a path to an image file (str) or a numpy array containing the image
+        output_path: Optional path to save the processed image
+    """
+    # Handle input
+    if isinstance(image_input, str):
+        image = cv2.imread(image_input)
+        if image is None:
+            return False, None
+    else:
+        image = image_input
     
     # Find chessboard corners
     ret, corners, board_corners = find_chessboard_corners(image)
@@ -232,9 +241,21 @@ def update_board_state(board_state: Dict, move: Dict) -> Dict:
 
 def create_diff_image(initial_path: str, current_path: str, output_path: str) -> str:
     """Create a difference image highlighting changes between two board states."""
+    # Load config to check calibration status
+    config = load_config()
+    is_calibrated = config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None
+    
     # Read images
     initial = cv2.imread(initial_path)
     current = cv2.imread(current_path)
+    
+    # If calibrated, use the processed images instead
+    if is_calibrated:
+        initial_processed = str(Path(initial_path).parent / f"{Path(initial_path).stem}_processed.jpg")
+        current_processed = str(Path(current_path).parent / f"{Path(current_path).stem}_processed.jpg")
+        if Path(initial_processed).exists() and Path(current_processed).exists():
+            initial = cv2.imread(initial_processed)
+            current = cv2.imread(current_processed)
     
     # Ensure images are the same size
     if initial.shape != current.shape:
@@ -315,6 +336,18 @@ class ChessAnalyzer:
         session_dir = Path(initial_path).parent
         move_prefix = Path(current_path).stem.split('_')[0:2]  # Get 'white_m1' or 'black_m1' part
         diff_path = str(session_dir / f"{'_'.join(move_prefix)}_diff.jpg")
+        
+        # Check if we should use processed images for analysis
+        config = load_config()
+        is_calibrated = config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None
+        
+        if is_calibrated:
+            initial_processed = str(Path(initial_path).parent / f"{Path(initial_path).stem}_processed.jpg")
+            current_processed = str(Path(current_path).parent / f"{Path(current_path).stem}_processed.jpg")
+            if Path(initial_processed).exists() and Path(current_processed).exists():
+                initial_path = initial_processed
+                current_path = current_processed
+        
         create_diff_image(initial_path, current_path, diff_path)
         
         if self.provider == "openai":
@@ -440,22 +473,24 @@ def list_cameras(max_idx=10):
             cap.release()
     return cams
 
-def tune_camera(cap):
-    """Optimize camera settings."""
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -4)
-    cap.set(cv2.CAP_PROP_BRIGHTNESS, 30)
-    cap.set(cv2.CAP_PROP_CONTRAST, 50)
-    cap.set(cv2.CAP_PROP_SATURATION, 50)
-    cap.set(cv2.CAP_PROP_GAIN, 30)
-
 def capture_board(camera_index, filename):
     """Capture and save chess board image."""
+    # Load config
+    config = load_config()
+    
     cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     if not cap.isOpened():
         raise RuntimeError(f"Camera {camera_index} not accessible.")
     
-    tune_camera(cap)
+    # Set camera properties from config
+    settings = config["camera"]["settings"]
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+    
     for _ in range(5): cap.read()  # Let exposure settle
     
     ret, frame = cap.read()
@@ -466,19 +501,21 @@ def capture_board(camera_index, filename):
     
     frame = cv2.convertScaleAbs(frame, alpha=0.9, beta=-5)
     
-    # Process the captured frame
-    processed_path = str(Path(filename).parent / f"{Path(filename).stem}_processed.jpg")
-    success, processed_frame = preprocess_board_image(frame, processed_path)
-    
-    if not success:
-        print("Warning: Could not detect chessboard corners. Using original image.")
-        cv2.imwrite(filename, frame)
-        return frame
-    
-    # Save both original and processed images
+    # Save original image
     cv2.imwrite(filename, frame)
-    cv2.imwrite(processed_path, processed_frame)
-    return processed_frame
+    
+    # If calibrated, apply transform
+    if config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None:
+        matrix = np.array(config["calibration"]["matrix"])
+        square_size = config["calibration"]["square_size"]
+        processed_frame = apply_transform(frame, matrix, square_size)
+        
+        # Save processed image
+        processed_path = str(Path(filename).parent / f"{Path(filename).stem}_processed.jpg")
+        cv2.imwrite(processed_path, processed_frame)
+        return processed_frame
+    
+    return frame
 
 def print_board(board_state: Dict):
     """Print the current board state in ASCII format."""
@@ -507,6 +544,25 @@ def print_board(board_state: Dict):
     print("  ─  ─  ─  ─  ─  ─  ─  ─")
     print("  a  b  c  d  e  f  g  h\n")
 
+def save_board_states(session_dir, board_states):
+    """Save board states history."""
+    states_file = session_dir / "board.json"
+    with open(states_file, 'w') as f:
+        json.dump(board_states, f, indent=2)
+
+def load_board_states(session_dir):
+    """Load board states history."""
+    states_file = session_dir / "board.json"
+    if states_file.exists():
+        with open(states_file, 'r') as f:
+            return json.load(f)
+    return [{
+        "timestamp": datetime.now().isoformat(),
+        "move_number": 0,
+        "player": "initial",
+        "board": INITIAL_BOARD
+    }]
+
 def main():
     """Main execution loop."""
     try:
@@ -523,16 +579,46 @@ def main():
         cam_idx = 1
         print(f"Using camera {cam_idx}")
         
+        # Load config
+        config = load_config()
+        
+        # Ask about calibration
+        if not config["camera"]["is_calibrated"]:
+            print("\nCamera is not calibrated.")
+            calibrate = input("Would you like to calibrate now? (y/n): ").lower().strip() == 'y'
+        else:
+            calibrate = input("\nCamera is already calibrated. Recalibrate? (y/n): ").lower().strip() == 'y'
+        
+        if calibrate:
+            print("\n=== Camera Calibration ===")
+            print("Please ensure the chessboard is well-lit and clearly visible.")
+            from calibrate_board import calibrate_from_camera
+            original_path, calibrated_path, _ = calibrate_from_camera(cam_idx, str(session_dir))
+            
+            if not calibrated_path:
+                print("Calibration was cancelled or failed. Using default camera settings.")
+            else:
+                print("Camera successfully calibrated!")
+                print(f"Calibration images saved to:\n- Original: {original_path}\n- Calibrated: {calibrated_path}")
+        
         # Choose AI provider
-        provider = input("Choose AI provider (openai/gemini): ").lower()
+        provider = input("\nChoose AI provider (openai/gemini): ").lower()
         while provider not in ["openai", "gemini"]:
             provider = input("Please choose either 'openai' or 'gemini': ").lower()
         
         analyzer = ChessAnalyzer(provider=provider)
         print(f"Using {provider.upper()} for analysis")
         
-        # Load existing moves and board state
-        moves, board_state = load_moves(session_dir)
+        # Load existing moves and board states
+        moves = []
+        board_states = load_board_states(session_dir)
+        board_state = board_states[-1]["board"].copy()  # Get latest state
+        moves_file = session_dir / "moves.json"
+        
+        if moves_file.exists():
+            with open(moves_file, 'r') as f:
+                moves = json.load(f)
+        
         move_number = len(moves) // 2 + 1  # Full moves (white + black)
         is_white_move = len(moves) % 2 == 0  # True if it's white's turn
         
@@ -574,6 +660,15 @@ def main():
             # Update board state
             board_state = update_board_state(board_state, move.model_dump())
             
+            # Save board state
+            board_states.append({
+                "timestamp": datetime.now().isoformat(),
+                "move_number": move_number,
+                "player": "white" if is_white_move else "black",
+                "board": board_state
+            })
+            save_board_states(session_dir, board_states)
+            
             # Print updated board state
             print_board(board_state)
             
@@ -605,8 +700,9 @@ def main():
             # Prompt for next move or game end
             print("\nOptions:")
             print("1. Press Enter to continue to next move")
-            print("2. Type 'new' to start a new game")
-            print("3. Type 'exit' to quit")
+            print("2. Type 'cal' to recalibrate camera")
+            print("3. Type 'new' to start a new game")
+            print("4. Type 'exit' to quit")
             
             choice = input("\nYour choice: ").lower().strip()
             if choice == 'new':
@@ -614,6 +710,11 @@ def main():
             elif choice == 'exit':
                 print("\nExiting...")
                 sys.exit(0)
+            elif choice == 'cal':
+                print("\n=== Camera Recalibration ===")
+                original_path, calibrated_path, _ = calibrate_from_camera(cam_idx, str(session_dir))
+                if calibrated_path:
+                    print("Camera successfully recalibrated!")
             # If Enter is pressed, continue with next move
         
     except KeyboardInterrupt:

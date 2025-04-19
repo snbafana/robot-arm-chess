@@ -1,0 +1,44 @@
+[
+  {
+    "move_number": 1,
+    "player": "white",
+    "timestamp": "2025-04-19T14:23:35.720519",
+    "initial_image": "white_m1_initial.jpg",
+    "current_image": "white_m1_current.jpg",
+    "provider": "gemini",
+    "move_notation": "e4",
+    "from_square": "e2",
+    "to_square": "e4",
+    "piece_type": "pawn",
+    "piece_color": "white",
+    "captured_piece": null
+  },
+  {
+    "move_number": 1,
+    "player": "black",
+    "timestamp": "2025-04-19T14:23:46.558438",
+    "initial_image": "white_m1_current.jpg",
+    "current_image": "black_m1_current.jpg",
+    "provider": "gemini",
+    "move_notation": "e5",
+    "from_square": "e7",
+    "to_square": "e5",
+    "piece_type": "pawn",
+    "piece_color": "black",
+    "captured_piece": null
+  },
+  {
+    "move_number": 2,
+    "player": "white",
+    "timestamp": "2025-04-19T14:24:02.376654",
+    "initial_image": "black_m1_current.jpg",
+    "current_image": "white_m2_current.jpg",
+    "provider": "gemini",
+    "move_notation": "Bb3",
+    "from_square": "c1",
+    "to_square": "b3",
+    "piece_type": "bishop",
+    "piece_color": "white",
+    "captured_piece": null
+  }
+]
