@@ -18,7 +18,7 @@ from calibrate_board import calibrate_from_camera, load_config, apply_transform
 import websocket
 
 # Import shadow board and stockfish modules
-from shadow_board import sync_shadow_board, save_fen_history, load_fen_history, export_game_positions
+from src.shadow_board import sync_shadow_board, save_fen_history, load_fen_history, export_game_positions
 from stockfish_api import analyze_position_with_stockfish, print_stockfish_analysis
 
 # Setup
