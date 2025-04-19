@@ -203,6 +203,76 @@ def save_calibration(image: np.ndarray, output_dir: Path, prefix: str = "calibra
         print("\nCalibration cancelled")
         return original_path, "", None
 
+def adjust_camera_settings(cap: cv2.VideoCapture):
+    """Adjust camera settings using keyboard controls."""
+    print("\n=== Camera Settings Adjustment ===")
+    print("Controls:")
+    print("  'b' - Brightness")
+    print("  'c' - Contrast")
+    print("  's' - Saturation")
+    print("  'e' - Exposure")
+    print("  'g' - Gain")
+    print("  '↑' - Increase value")
+    print("  '↓' - Decrease value")
+    print("  's' - Save settings")
+    print("  'q' - Quit adjustment")
+    
+    # Get current settings
+    settings = {
+        'brightness': cap.get(cv2.CAP_PROP_BRIGHTNESS),
+        'contrast': cap.get(cv2.CAP_PROP_CONTRAST),
+        'saturation': cap.get(cv2.CAP_PROP_SATURATION),
+        'exposure': cap.get(cv2.CAP_PROP_EXPOSURE),
+        'gain': cap.get(cv2.CAP_PROP_GAIN)
+    }
+    
+    # Step sizes for adjustments
+    steps = {
+        'brightness': 1,
+        'contrast': 1,
+        'saturation': 1,
+        'exposure': 1,
+        'gain': 1
+    }
+    
+    current_setting = 'brightness'
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Display current settings
+        cv2.putText(frame, f"Current: {current_setting}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Value: {settings[current_setting]:.1f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        cv2.imshow("Camera Settings", frame)
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('b'):
+            current_setting = 'brightness'
+        elif key == ord('c'):
+            current_setting = 'contrast'
+        elif key == ord('s'):
+            current_setting = 'saturation'
+        elif key == ord('e'):
+            current_setting = 'exposure'
+        elif key == ord('g'):
+            current_setting = 'gain'
+        elif key == 82:  # Up arrow
+            settings[current_setting] += steps[current_setting]
+            cap.set(getattr(cv2, f"CAP_PROP_{current_setting.upper()}"), settings[current_setting])
+        elif key == 84:  # Down arrow
+            settings[current_setting] -= steps[current_setting]
+            cap.set(getattr(cv2, f"CAP_PROP_{current_setting.upper()}"), settings[current_setting])
+        elif key == ord('q'):
+            break
+    
+    cv2.destroyWindow("Camera Settings")
+    return settings
+
 def calibrate_from_camera(camera_index: int = 0, output_dir: str = "calibration") -> Tuple[str, str, Optional[np.ndarray]]:
     """
     Capture image from camera and perform manual calibration.
@@ -231,7 +301,8 @@ def calibrate_from_camera(camera_index: int = 0, output_dir: str = "calibration"
     cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
     cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
     
-    print("\nPress SPACE to capture image or 'q' to quit")
+    print("\nPress 'a' to adjust camera settings")
+    print("Press SPACE to capture image or 'q' to quit")
     
     while True:
         ret, frame = cap.read()
@@ -241,7 +312,14 @@ def calibrate_from_camera(camera_index: int = 0, output_dir: str = "calibration"
         cv2.imshow("Camera Feed", frame)
         key = cv2.waitKey(1) & 0xFF
         
-        if key == ord(' '):  # Space key
+        if key == ord('a'):  # Adjust settings
+            new_settings = adjust_camera_settings(cap)
+            # Update config with new settings
+            config["camera"]["settings"] = new_settings
+            save_config(config)
+            print("\nSettings saved. Press SPACE to capture or 'q' to quit")
+        
+        elif key == ord(' '):  # Space key
             cv2.destroyWindow("Camera Feed")
             cap.release()
             return save_calibration(frame, output_dir)
