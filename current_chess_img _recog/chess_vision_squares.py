@@ -1,23 +1,19 @@
 """
 chess_vision_squares.py
 ---------------------
-Capture and analyze chess moves using computer vision and square interpolation.
-Uses calibrated board images divided into 64 squares for move detection.
+Capture and analyze chess moves using computer vision.
+Simplified version focusing on board configuration and move detection.
 """
 
 import cv2
 import numpy as np
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from pydantic import BaseModel
-from dotenv import load_dotenv
-from calibrate_board import load_config, apply_transform, calibrate_from_camera
+from datetime import datetime
 
 # Setup
-load_dotenv()
 CAPTURES_DIR = Path("captures")
 CAPTURES_DIR.mkdir(exist_ok=True)
 
@@ -28,12 +24,20 @@ SQUARE_SIZE = 100    # Size of each square in pixels
 # Piece symbols for visualization
 PIECE_SYMBOLS = {
     "white": {
-        "pawn": "♙", "knight": "♘", "bishop": "♗",
-        "rook": "♖", "queen": "♕", "king": "♔"
+        "pawn": "♙",
+        "knight": "♘",
+        "bishop": "♗",
+        "rook": "♖",
+        "queen": "♕",
+        "king": "♔"
     },
     "black": {
-        "pawn": "♟", "knight": "♞", "bishop": "♝",
-        "rook": "♜", "queen": "♛", "king": "♚"
+        "pawn": "♟",
+        "knight": "♞",
+        "bishop": "♝",
+        "rook": "♜",
+        "queen": "♛",
+        "king": "♚"
     }
 }
 
@@ -73,230 +77,595 @@ INITIAL_BOARD = {
     "h7": {"type": "pawn", "color": "black"}
 }
 
-
-class ChessMove(BaseModel):
-    """Represents a chess move."""
-    move_notation: str
-    from_square: str
-    to_square: str
-    piece_type: str
-    piece_color: str
-    captured_piece: Optional[str] = None
-
-class SquareAnalyzer:
-    """Analyzes chess moves by comparing board squares."""
-    
-    def __init__(self, board_size, square_size):
-        """Initialize the analyzer with board size and square size."""
-        self.board_size = board_size
-        self.square_size = square_size
-        self.square_cache = {}  # Cache for square templates
-    
-    def get_square_coordinates(self, img: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Get coordinates for all 64 squares."""
-        height, width = img.shape[:2]
-        square_w = width // self.board_size[1]
-        square_h = height // self.board_size[0]
-        
-        squares = []
-        for row in range(self.board_size[0]):
-            for col in range(self.board_size[1]):
-                x = col * square_w
-                y = row * square_h
-                squares.append((x, y, square_w, square_h))
-        return squares
-    
-    def get_square_name(self, row: int, col: int) -> str:
-        """Convert row/col to algebraic notation (e.g., 'e4')."""
-        file = chr(ord('a') + col)
-        rank = str(8 - row)
-        return f"{file}{rank}"
-    
-    def get_square_content(self, img: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray:
-        """Extract and preprocess a single square."""
-        square = img[y:y+h, x:x+w]
-        # Convert to grayscale
-        gray = cv2.cvtColor(square, cv2.COLOR_BGR2GRAY)
-        # Apply threshold to reduce noise
-        _, thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-        return thresh
-    
-    def compare_squares(self, sq1: np.ndarray, sq2: np.ndarray) -> float:
-        """Compare two squares and return similarity score."""
-        # Use structural similarity index
-        return cv2.matchTemplate(sq1, sq2, cv2.TM_CCOEFF_NORMED)[0][0]
-    
-    def detect_changes(self, initial: np.ndarray, current: np.ndarray) -> Tuple[List[str], List[float]]:
-        """Detect which squares changed between two board states."""
-        changes = []
-        scores = []
-        squares = self.get_square_coordinates(initial)
-        
-        for idx, (x, y, w, h) in enumerate(squares):
-            row, col = idx // self.board_size[1], idx % self.board_size[1]
-            square_name = self.get_square_name(row, col)
-            
-            sq1 = self.get_square_content(initial, x, y, w, h)
-            sq2 = self.get_square_content(current, x, y, w, h)
-            
-            similarity = self.compare_squares(sq1, sq2)
-            if similarity < 0.8:  # Threshold for change detection
-                changes.append(square_name)
-                scores.append(similarity)
-        
-        return changes, scores
-    
-    def analyze_move(self, initial_path: str, current_path: str, board_state: Dict) -> ChessMove:
-        """Analyze chess move by comparing squares."""
-        # Read images (use processed/calibrated images if available)
-        config = load_config()
-        is_calibrated = config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None
-        
-        if is_calibrated:
-            initial_processed = str(Path(initial_path).parent / f"{Path(initial_path).stem}_processed.jpg")
-            current_processed = str(Path(current_path).parent / f"{Path(current_path).stem}_processed.jpg")
-            if Path(initial_processed).exists() and Path(current_processed).exists():
-                initial_path = initial_processed
-                current_path = current_processed
-        
-        initial = cv2.imread(initial_path)
-        current = cv2.imread(current_path)
-        
-        # Detect changed squares
-        changed_squares, scores = self.detect_changes(initial, current)
-        
-        if len(changed_squares) != 2:
-            raise ValueError(f"Expected 2 changed squares, found {len(changed_squares)}")
-        
-        # Determine source and destination squares
-        from_square = changed_squares[0]
-        to_square = changed_squares[1]
-        
-        # Get piece information from board state
-        piece = board_state.get(from_square)
-        if not piece:
-            raise ValueError(f"No piece found at square {from_square}")
-        
-        # Check for capture
-        captured_piece = None
-        if to_square in board_state:
-            captured_piece = board_state[to_square]["type"]
-        
-        # Create move notation
-        if piece["type"] == "pawn":
-            move_notation = to_square
-            if captured_piece:
-                file_from = from_square[0]
-                move_notation = f"{file_from}x{to_square}"
-        else:
-            piece_letter = piece["type"][0].upper()
-            if piece_letter == "K":  # Knight uses 'N'
-                piece_letter = "N"
-            move_notation = f"{piece_letter}{to_square}"
-            if captured_piece:
-                move_notation = f"{piece_letter}x{to_square}"
-        
-        # Create visualization of the changes
-        self.create_change_visualization(initial, current, from_square, to_square,
-                                      str(Path(current_path).parent / f"{Path(current_path).stem}_changes.jpg"))
-        
-        return ChessMove(
-            move_notation=move_notation,
-            from_square=from_square,
-            to_square=to_square,
-            piece_type=piece["type"],
-            piece_color=piece["color"],
-            captured_piece=captured_piece
-        )
-    
-    def create_change_visualization(self, initial: np.ndarray, current: np.ndarray,
-                                  from_square: str, to_square: str, output_path: str):
-        """Create visualization of detected changes."""
-        vis = current.copy()
-        squares = self.get_square_coordinates(current)
-        
-        # Find coordinates for source and destination squares
-        for idx, (x, y, w, h) in enumerate(squares):
-            row, col = idx // self.board_size[1], idx % self.board_size[1]
-            square_name = self.get_square_name(row, col)
-            
-            if square_name == from_square:
-                # Draw red rectangle for source
-                cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 0, 255), 2)
-                cv2.putText(vis, "Source", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-            elif square_name == to_square:
-                # Draw green rectangle for destination
-                cv2.rectangle(vis, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cv2.putText(vis, "Destination", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # Save the visualization
-        cv2.imwrite(output_path, vis)
-        
-        # Create and save diff image
-        diff = cv2.absdiff(initial, current)
-        diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-        _, diff = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
-        diff = cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
-        
-        # Add colored rectangles to diff image
-        for idx, (x, y, w, h) in enumerate(squares):
-            row, col = idx // self.board_size[1], idx % self.board_size[1]
-            square_name = self.get_square_name(row, col)
-            
-            if square_name == from_square:
-                cv2.rectangle(diff, (x, y), (x+w, y+h), (0, 0, 255), 2)
-            elif square_name == to_square:
-                cv2.rectangle(diff, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        
-        # Save diff image with consistent naming
-        diff_path = str(Path(output_path).parent / f"{Path(output_path).stem}_diff.jpg")
-        cv2.imwrite(diff_path, diff)
-
-def get_session_dir():
-    """Create a new session directory with timestamp."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_dir = CAPTURES_DIR / f"game_{timestamp}"
-    session_dir.mkdir(exist_ok=True)
-    return session_dir
-
-def save_board_states(session_dir, board_states):
-    """Save board states history."""
-    states_file = session_dir / "board.json"
-    with open(states_file, 'w') as f:
-        json.dump(board_states, f, indent=2)
-
-def load_board_states(session_dir):
-    """Load board states history."""
-    states_file = session_dir / "board.json"
-    if states_file.exists():
-        with open(states_file, 'r') as f:
+def load_config() -> Dict:
+    """Load configuration from config file."""
+    config_path = Path("config.json")
+    if config_path.exists():
+        with open(config_path, 'r') as f:
             return json.load(f)
-    return [{
-        "timestamp": datetime.now().isoformat(),
-        "move_number": 0,
-        "player": "initial",
-        "board": INITIAL_BOARD
-    }]
-
-def save_moves(session_dir, moves):
-    """Save move history."""
-    moves_file = session_dir / "moves.json"
-    with open(moves_file, 'w') as f:
-        json.dump(moves, f, indent=2)
-
-def update_board_state(board_state: Dict, move: Dict) -> Dict:
-    """Update the board state based on a move."""
-    new_state = board_state.copy()
-    # Remove piece from old square
-    if move["from_square"] in new_state:
-        del new_state[move["from_square"]]
-    # Add piece to new square
-    new_state[move["to_square"]] = {
-        "type": move["piece_type"],
-        "color": move["piece_color"]
+    return {
+        "camera": {
+            "index": 1,
+            "is_calibrated": False,
+            "settings": {
+                "exposure": -4,
+                "brightness": 30,
+                "contrast": 50,
+                "saturation": 50,
+                "gain": 30
+            }
+        },
+        "calibration": {
+            "square_size": SQUARE_SIZE,
+            "matrix": None,
+            "last_calibration": None
+        },
+        "board": {
+            "position": None,
+            "size": None,
+            "square_size": SQUARE_SIZE
+        }
     }
-    return new_state
+
+def save_config(config: Dict):
+    """Save configuration to file."""
+    with open("config.json", 'w') as f:
+        json.dump(config, f, indent=2)
+
+def adjust_camera_settings(camera_index: int, config: Dict) -> Dict:
+    """Adjust camera settings interactively."""
+    print("\n=== Camera Settings Adjustment ===")
+    print("Use the following keys to adjust settings:")
+    print("b: brightness (+/-)")
+    print("c: contrast (+/-)")
+    print("e: exposure (+/-)")
+    print("s: saturation (+/-)")
+    print("g: gain (+/-)")
+    print("r: reset to defaults")
+    print("q: quit and save")
+    
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError(f"Camera {camera_index} not accessible.")
+    
+    # Set initial settings
+    settings = config["camera"]["settings"]
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+    
+    step = 5  # Adjustment step size
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture frame")
+            break
+        
+        # Display current settings
+        cv2.putText(frame, f"Brightness: {settings['brightness']}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Contrast: {settings['contrast']}", (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Exposure: {settings['exposure']}", (10, 90), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Saturation: {settings['saturation']}", (10, 120), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, f"Gain: {settings['gain']}", (10, 150), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        cv2.imshow("Camera Settings", frame)
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('b'):  # Brightness
+            settings["brightness"] = min(100, max(0, settings["brightness"] + step))
+            cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+        elif key == ord('c'):  # Contrast
+            settings["contrast"] = min(100, max(0, settings["contrast"] + step))
+            cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+        elif key == ord('e'):  # Exposure
+            settings["exposure"] = min(0, max(-10, settings["exposure"] - step))
+            cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+        elif key == ord('s'):  # Saturation
+            settings["saturation"] = min(100, max(0, settings["saturation"] + step))
+            cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+        elif key == ord('g'):  # Gain
+            settings["gain"] = min(100, max(0, settings["gain"] + step))
+            cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+        elif key == ord('r'):  # Reset
+            settings = {
+                "exposure": -4,
+                "brightness": 30,
+                "contrast": 50,
+                "saturation": 50,
+                "gain": 30
+            }
+            cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+            cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+            cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+            cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+            cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+        elif key == ord('q'):  # Quit
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    
+    # Update config with new settings
+    config["camera"]["settings"] = settings
+    save_config(config)
+    return config
+
+def order_corners(pts: np.ndarray) -> np.ndarray:
+    """Order corners in [top-left, top-right, bottom-right, bottom-left] order."""
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+def create_chess_grid_overlay(image: np.ndarray, highlighted_squares: List[Tuple[int, int]] = None) -> np.ndarray:
+    """Create a chess grid overlay on the image.
+    
+    Args:
+        image: Input image to overlay grid on
+        highlighted_squares: Optional list of (rank, file) tuples to highlight
+    
+    Returns:
+        Image with grid overlay
+    """
+    height, width = image.shape[:2]
+    
+    # Create visualization
+    if len(image.shape) == 2:  # If grayscale
+        vis_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        vis_image = image.copy()
+    
+    # Draw grid lines
+    for i in range(9):  # 9 lines for 8 squares
+        # Vertical lines
+        x = (i * width) // 8
+        cv2.line(vis_image, (x, 0), (x, height), (0, 255, 0), 2)
+        
+        # Horizontal lines
+        y = (i * height) // 8
+        cv2.line(vis_image, (0, y), (width, y), (0, 255, 0), 2)
+    
+    # Add square labels (A1 through H8)
+    for i in range(8):  # files (A-H, vertical)
+        for j in range(8):  # ranks (1-8, horizontal)
+            # Files go top to bottom (A-H), ranks go left to right (1-8)
+            file_letter = chr(ord('A') + i)  # A-H
+            rank_number = str(j + 1)  # 1-8
+            square_name = f"{file_letter}{rank_number}"
+            
+            # Position labels in top-left of each square
+            x = (j * width) // 8 + 5  # j for rank (horizontal)
+            y = (i * height) // 8 + 20  # i for file (vertical)
+            
+            # Draw label
+            cv2.putText(vis_image, square_name, (x, y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    # Highlight specified squares if any
+    if highlighted_squares:
+        square_height = height // 8
+        square_width = width // 8
+        
+        for rank, file in highlighted_squares:
+            # Convert coordinates to match new orientation
+            x_start = (rank - 1) * square_width  # rank is horizontal (1-8)
+            y_start = (ord(file) - ord('A')) * square_height  # file is vertical (A-H)
+            
+            # Draw filled rectangle with semi-transparency
+            overlay = vis_image.copy()
+            cv2.rectangle(overlay, 
+                         (x_start, y_start),
+                         (x_start + square_width, y_start + square_height),
+                         (0, 255, 0), -1)  # -1 for filled rectangle
+            # Apply transparency
+            cv2.addWeighted(overlay, 0.3, vis_image, 0.7, 0, vis_image)
+            # Draw border
+            cv2.rectangle(vis_image, 
+                         (x_start, y_start),
+                         (x_start + square_width, y_start + square_height),
+                         (0, 255, 0), 2)
+    
+    return vis_image
+
+def configure_board(camera_index: int) -> Tuple[bool, Dict]:
+    """Configure the chessboard in two steps: corner selection and board selection."""
+    config = load_config()
+    
+    # Step 1: Camera Settings Adjustment
+    print("\n=== Camera Settings Adjustment ===")
+    config = adjust_camera_settings(camera_index, config)
+    
+    # Step 2: Corner Selection
+    print("\n=== Corner Selection ===")
+    print("1. Click on the four corners of the chessboard in this order:")
+    print("   - Top-left corner")
+    print("   - Top-right corner")
+    print("   - Bottom-right corner")
+    print("   - Bottom-left corner")
+    print("2. Press 'r' to reset if you make a mistake")
+    print("3. Press 'c' to confirm when all corners are selected")
+    print("4. Press 'q' to quit\n")
+    
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError(f"Camera {camera_index} not accessible.")
+    
+    # Set camera properties
+    settings = config["camera"]["settings"]
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+    
+    corners = []
+    image_copy = None
+    
+    def click_event(event, x, y, flags, param):
+        nonlocal corners, image_copy
+        if event == cv2.EVENT_LBUTTONDOWN and len(corners) < 4:
+            corners.append((x, y))
+            cv2.circle(image_copy, (x, y), 5, (0, 255, 0), -1)
+            if len(corners) > 1:
+                cv2.line(image_copy, corners[-2], corners[-1], (0, 255, 0), 2)
+            if len(corners) == 4:
+                cv2.line(image_copy, corners[-1], corners[0], (0, 255, 0), 2)
+    
+    cv2.namedWindow("Corner Selection")
+    cv2.setMouseCallback("Corner Selection", click_event)
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture frame")
+            break
+        
+        image_copy = frame.copy()
+        
+        # Draw current corners
+        for i, (x, y) in enumerate(corners):
+            cv2.circle(image_copy, (x, y), 5, (0, 255, 0), -1)
+            if i > 0:
+                cv2.line(image_copy, corners[i-1], (x, y), (0, 255, 0), 2)
+        if len(corners) == 4:
+            cv2.line(image_copy, corners[-1], corners[0], (0, 255, 0), 2)
+        
+        cv2.imshow("Corner Selection", image_copy)
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('r'):
+            corners = []
+        elif key == ord('c') and len(corners) == 4:
+            break
+        elif key == ord('q'):
+            cap.release()
+            cv2.destroyAllWindows()
+            return False, config
+    
+    cv2.destroyAllWindows()
+    
+    # Step 3: Board Selection
+    print("\n=== Board Selection ===")
+    print("1. Click and drag to select the entire chessboard")
+    print("2. Press 's' to save the selection")
+    print("3. Press 'r' to reset")
+    print("4. Press 'q' to quit")
+    
+    drawing = False
+    ix, iy = -1, -1
+    fx, fy = -1, -1
+    board_width = 0
+    board_height = 0
+    
+    def draw_rectangle(event, x, y, flags, param):
+        nonlocal ix, iy, fx, fy, drawing, board_width, board_height
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing = True
+            ix, iy = x, y
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if drawing:
+                fx, fy = x, y
+        elif event == cv2.EVENT_LBUTTONUP:
+            drawing = False
+            fx, fy = x, y
+            board_width = abs(fx - ix)
+            board_height = abs(fy - iy)
+    
+    cv2.namedWindow("Board Selection")
+    cv2.setMouseCallback("Board Selection", draw_rectangle)
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture frame")
+            break
+        
+        # Apply perspective transform using corners
+        if len(corners) == 4:
+            corners_array = np.array(corners, dtype="float32")
+            ordered_corners = order_corners(corners_array)
+            board_width = 8 * SQUARE_SIZE
+            board_height = 8 * SQUARE_SIZE
+            dst_points = np.array([
+                [0, 0],
+                [board_width - 1, 0],
+                [board_width - 1, board_height - 1],
+                [0, board_height - 1]
+            ], dtype="float32")
+            matrix = cv2.getPerspectiveTransform(ordered_corners, dst_points)
+            frame = cv2.warpPerspective(frame, matrix, (board_width, board_height))
+        
+        # Draw selection rectangle
+        if ix != -1 and iy != -1:
+            if drawing:
+                cv2.rectangle(frame, (ix, iy), (fx, fy), (0, 255, 0), 2)
+            elif fx != -1 and fy != -1 and board_width > 0 and board_height > 0:
+                cv2.rectangle(frame, (ix, iy), (fx, fy), (0, 255, 0), 2)
+        
+        cv2.imshow("Board Selection", frame)
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('s'):
+            if board_width > 0 and board_height > 0:
+                break
+            else:
+                print("Please select the chessboard first")
+        elif key == ord('r'):
+            ix, iy = -1, -1
+            fx, fy = -1, -1
+            board_width = 0
+            board_height = 0
+        elif key == ord('q'):
+            cap.release()
+            cv2.destroyAllWindows()
+            return False, config
+    
+    # After board selection loop ends and before Step 4
+    # Save the selected region
+    print("\n=== Saving Selected Region ===")
+    
+    # Ensure coordinates are in the correct order (top-left to bottom-right)
+    x_start = min(ix, fx)
+    x_end = max(ix, fx)
+    y_start = min(iy, fy)
+    y_end = max(iy, fy)
+    
+    # Ensure coordinates are within frame bounds
+    height, width = frame.shape[:2]
+    x_start = max(0, x_start)
+    x_end = min(width, x_end)
+    y_start = max(0, y_start)
+    y_end = min(height, y_end)
+    
+    # Check if we have valid coordinates
+    if x_start >= x_end or y_start >= y_end:
+        print("Invalid selection coordinates. Please try again.")
+        return False, config
+    
+    # Crop the selected region
+    selected_region = frame[y_start:y_end, x_start:x_end]
+    
+    # Verify the selected region is not empty
+    if selected_region.size == 0:
+        print("Selected region is empty. Please try again.")
+        return False, config
+    
+    selected_path = str(CAPTURES_DIR / "selected_region.jpg")
+    cv2.imwrite(selected_path, selected_region)
+    print(f"Selected region saved to: {selected_path}")
+    
+    # Step 4: Show chess notation grid
+    print("\n=== Chess Notation Grid ===")
+    print("Showing chess notation grid. Press any key to continue...")
+    
+    # Create grid visualization
+    grid_frame = create_chess_grid_overlay(selected_region)
+    
+    # Show the grid
+    cv2.imshow("Chess Notation Grid", grid_frame)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    
+    # Print square dimensions
+    print(f"\nSquare dimensions: {board_width // 8}x{board_height // 8} pixels")
+    print("Chess notation grid shown. Configuration complete.")
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    
+    # Update config with new settings
+    config["camera"]["is_calibrated"] = True
+    config["calibration"]["matrix"] = matrix.tolist()
+    config["calibration"]["last_calibration"] = datetime.now().isoformat()
+    config["board"]["position"] = (ix, iy)
+    config["board"]["size"] = (board_width, board_height)
+    config["board"]["square_size"] = min(board_width, board_height) // 8
+    
+    save_config(config)
+    return True, config
+
+def capture_board(camera_index: int, config: Dict) -> np.ndarray:
+    """Capture and process chess board image."""
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError(f"Camera {camera_index} not accessible.")
+    
+    # Set camera properties
+    settings = config["camera"]["settings"]
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
+    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
+    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
+    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
+    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
+    
+    for _ in range(5): cap.read()  # Let exposure settle
+    
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        raise RuntimeError("Failed to capture frame.")
+    
+    frame = cv2.convertScaleAbs(frame, alpha=0.9, beta=-5)
+    
+    # Apply perspective transform if calibrated
+    if config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None:
+        matrix = np.array(config["calibration"]["matrix"])
+        square_size = config["calibration"]["square_size"]
+        board_width = 8 * square_size
+        board_height = 8 * square_size
+        
+        # Apply perspective transform
+        frame = cv2.warpPerspective(frame, matrix, (board_width, board_height))
+        
+        # Get board position and size from config
+        ix, iy = config["board"]["position"]
+        board_width, board_height = config["board"]["size"]
+        
+        # Crop to the selected region
+        frame = frame[iy:iy+board_height, ix:ix+board_width]
+    
+    return frame
+
+def save_image(image: np.ndarray, path: str) -> str:
+    """Save image with error handling."""
+    if not str(path).lower().endswith('.jpg'):
+        path = str(Path(path).with_suffix('.jpg'))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    success = cv2.imwrite(path, image)
+    if not success:
+        raise RuntimeError(f"Failed to save image to {path}")
+    return path
+
+def analyze_move_from_diff(diff_image: np.ndarray, initial_image: np.ndarray, current_image: np.ndarray) -> Tuple[str, str]:
+    """Analyze diff image to detect piece movement.
+    
+    Args:
+        diff_image: The difference image between initial and current
+        initial_image: The initial board state image
+        current_image: The current board state image
+    
+    Returns:
+        Tuple of (from_square, to_square) in chess notation
+    """
+    # Get image dimensions
+    height, width = diff_image.shape[:2]
+    
+    # Calculate square dimensions
+    square_height = height // 8
+    square_width = width // 8
+    
+    # Convert all images to grayscale if they're in color
+    if len(diff_image.shape) == 3:
+        diff_gray = cv2.cvtColor(diff_image, cv2.COLOR_BGR2GRAY)
+        initial_gray = cv2.cvtColor(initial_image, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+    else:
+        diff_gray = diff_image
+        initial_gray = initial_image
+        current_gray = current_image
+    
+    # Initialize array to store average intensity for each square
+    square_intensities = np.zeros((8, 8))
+    
+    # Calculate average intensity for each square in diff image
+    for i in range(8):  # files (vertical)
+        for j in range(8):  # ranks (horizontal)
+            # Get square region
+            y_start = i * square_height
+            y_end = (i + 1) * square_height
+            x_start = j * square_width
+            x_end = (j + 1) * square_width
+            
+            square = diff_gray[y_start:y_end, x_start:x_end]
+            square_intensities[i, j] = np.mean(square)
+    
+    # Find the two squares with highest intensity changes
+    flat_intensities = square_intensities.flatten()
+    top_two_indices = np.argsort(flat_intensities)[-2:]
+    
+    # Get the squares' coordinates
+    squares = []
+    for idx in top_two_indices:
+        file_idx = idx // 8  # Vertical position (A-H)
+        rank = idx % 8 + 1   # Horizontal position (1-8)
+        
+        # Get average intensities for this square in both initial and current images
+        y_start = file_idx * square_height
+        y_end = (file_idx + 1) * square_height
+        x_start = (rank - 1) * square_width
+        x_end = rank * square_width
+        
+        initial_square = initial_gray[y_start:y_end, x_start:x_end]
+        current_square = current_gray[y_start:y_end, x_start:x_end]
+        
+        initial_intensity = np.mean(initial_square)
+        current_intensity = np.mean(current_square)
+        
+        file_letter = chr(ord('A') + file_idx)
+        squares.append({
+            'notation': f"{file_letter}{rank}",
+            'initial_intensity': initial_intensity,
+            'current_intensity': current_intensity
+        })
+    
+    # Determine which square is the source (had piece initially, now empty)
+    # and which is destination (was empty, now has piece)
+    if abs(squares[0]['initial_intensity'] - squares[0]['current_intensity']) > \
+       abs(squares[1]['initial_intensity'] - squares[1]['current_intensity']):
+        # Square 0 had bigger change
+        if squares[0]['initial_intensity'] > squares[0]['current_intensity']:
+            # Square 0 got darker (piece moved away)
+            from_square, to_square = squares[0]['notation'], squares[1]['notation']
+        else:
+            # Square 0 got lighter (piece moved here)
+            from_square, to_square = squares[1]['notation'], squares[0]['notation']
+    else:
+        # Square 1 had bigger change
+        if squares[1]['initial_intensity'] > squares[1]['current_intensity']:
+            # Square 1 got darker (piece moved away)
+            from_square, to_square = squares[1]['notation'], squares[0]['notation']
+        else:
+            # Square 1 got lighter (piece moved here)
+            from_square, to_square = squares[0]['notation'], squares[1]['notation']
+    
+    # Create visualization with grid overlay
+    vis_image = create_chess_grid_overlay(diff_gray, [(int(to_square[1]), to_square[0])])
+    
+    # Add arrow from source to destination
+    start_x = (int(from_square[1]) - 1) * square_width + square_width // 2
+    start_y = (ord(from_square[0]) - ord('A')) * square_height + square_height // 2
+    end_x = (int(to_square[1]) - 1) * square_width + square_width // 2
+    end_y = (ord(to_square[0]) - ord('A')) * square_height + square_height // 2
+    
+    # Draw arrow
+    cv2.arrowedLine(vis_image, (start_x, start_y), (end_x, end_y),
+                    (0, 255, 0), 2, cv2.LINE_AA, tipLength=0.2)
+    
+    # Add move text
+    move_text = f"Move: {from_square} -> {to_square}"
+    cv2.putText(vis_image, move_text, (10, height - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    
+    # Save visualization
+    cv2.imwrite(str(CAPTURES_DIR / "move_detection.jpg"), vis_image)
+    
+    return to_square, from_square
 
 def print_board(board_state: Dict):
     """Print the current board state in ASCII format."""
@@ -325,394 +694,169 @@ def print_board(board_state: Dict):
     print("  ─  ─  ─  ─  ─  ─  ─  ─")
     print("  a  b  c  d  e  f  g  h\n")
 
-def list_cameras(max_idx=10):
-    """List available cameras."""
-    cams = []
-    for i in range(max_idx):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            ok, _ = cap.read()
-            if ok: cams.append(i)
-            cap.release()
-    return cams
+def update_board_state(board_state: Dict, from_square: str, to_square: str) -> Dict:
+    """Update the board state based on a move."""
+    new_state = board_state.copy()
+    
+    # Get the piece that's moving
+    if from_square in new_state:
+        piece = new_state[from_square]
+        # Remove piece from old square
+        del new_state[from_square]
+        # Add piece to new square (this will automatically handle captures)
+        new_state[to_square] = piece
+    
+    return new_state
 
-def capture_board(camera_index, filename):
-    """Capture and save chess board image."""
-    # Load config
-    config = load_config()
-    
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        raise RuntimeError(f"Camera {camera_index} not accessible.")
-    
-    # Set camera properties from config
-    settings = config["camera"]["settings"]
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
-    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
-    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
-    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
-    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
-    
-    for _ in range(5): cap.read()  # Let exposure settle
-    
-    ret, frame = cap.read()
-    cap.release()
-    
-    if not ret:
-        raise RuntimeError("Failed to capture frame.")
-    
-    frame = cv2.convertScaleAbs(frame, alpha=0.9, beta=-5)
-    
-    # Save original image
-    cv2.imwrite(filename, frame)
-    
-    # If calibrated, apply transform
-    if config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None:
-        matrix = np.array(config["calibration"]["matrix"])
-        square_size = config["calibration"]["square_size"]
-        processed_frame = apply_transform(frame, matrix, square_size)
-        
-        # Save processed image
-        processed_path = str(Path(filename).parent / f"{Path(filename).stem}_processed.jpg")
-        cv2.imwrite(processed_path, processed_frame)
-        return processed_frame
-    
-    return frame
+def save_moves(session_dir: Path, moves: List[Dict]):
+    """Save move history."""
+    moves_file = session_dir / "moves.json"
+    with open(moves_file, 'w') as f:
+        json.dump(moves, f, indent=2)
 
-def select_chessboard(camera_index, config):
-    """Select the chessboard area and create a uniform 8x8 grid."""
-    print("\n=== Chessboard Selection ===")
-    print("1. Click and drag to select the entire chessboard")
-    print("2. Press 's' to save the selection")
-    print("3. Press 'r' to reset")
-    print("4. Press 'q' to quit")
-    
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        raise RuntimeError(f"Camera {camera_index} not accessible.")
-    
-    # Set camera properties from config
-    settings = config["camera"]["settings"]
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-    cap.set(cv2.CAP_PROP_EXPOSURE, settings["exposure"])
-    cap.set(cv2.CAP_PROP_BRIGHTNESS, settings["brightness"])
-    cap.set(cv2.CAP_PROP_CONTRAST, settings["contrast"])
-    cap.set(cv2.CAP_PROP_SATURATION, settings["saturation"])
-    cap.set(cv2.CAP_PROP_GAIN, settings["gain"])
-    
-    # Variables for selection
-    drawing = False
-    ix, iy = -1, -1
-    fx, fy = -1, -1
-    board_width = 0
-    board_height = 0
-    
-    def draw_rectangle(event, x, y, flags, param):
-        nonlocal ix, iy, fx, fy, drawing, board_width, board_height
-        
-        if event == cv2.EVENT_LBUTTONDOWN:
-            drawing = True
-            ix, iy = x, y
-            
-        elif event == cv2.EVENT_MOUSEMOVE:
-            if drawing:
-                fx, fy = x, y
-                
-        elif event == cv2.EVENT_LBUTTONUP:
-            drawing = False
-            fx, fy = x, y
-            board_width = abs(fx - ix)
-            board_height = abs(fy - iy)
-    
-    # Create window with WINDOW_NORMAL flag to allow resizing
-    cv2.namedWindow('Chessboard Selection', cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback('Chessboard Selection', draw_rectangle)
-    
-    def draw_chessboard_grid(frame, start_x, start_y, width, height):
-        """Draw the chessboard grid with position labels."""
-        # Calculate square size
-        square_width = width // 8
-        square_height = height // 8
-        
-        # Draw grid lines
-        for i in range(9):
-            # Draw horizontal lines
-            cv2.line(frame, (start_x, start_y + i * square_height), 
-                    (start_x + 8 * square_width, start_y + i * square_height), 
-                    (0, 0, 255), 1)
-            # Draw vertical lines
-            cv2.line(frame, (start_x + i * square_width, start_y), 
-                    (start_x + i * square_width, start_y + 8 * square_height), 
-                    (0, 0, 255), 1)
-        
-        # Add position labels to each square
-        for row in range(8):
-            for col in range(8):
-                # Calculate square position
-                x = start_x + col * square_width
-                y = start_y + row * square_height
-                
-                # Get square name (e.g., "a8", "h1")
-                file = chr(ord('a') + col)
-                rank = str(8 - row)
-                square_name = f"{file}{rank}"
-                
-                # Draw square name in the center
-                text_size = cv2.getTextSize(square_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-                text_x = x + (square_width - text_size[0]) // 2
-                text_y = y + (square_height + text_size[1]) // 2
-                
-                cv2.putText(frame, square_name, (text_x, text_y),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Add file labels (a-h)
-        for i in range(8):
-            file_label = chr(ord('a') + i)
-            cv2.putText(frame, file_label, 
-                      (start_x + i * square_width + square_width//2 - 5, 
-                       start_y + 8 * square_height + 20),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Add rank labels (8-1)
-        for i in range(8):
-            rank_label = str(8 - i)
-            cv2.putText(frame, rank_label,
-                      (start_x - 15, start_y + i * square_height + square_height//2 + 5),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to capture frame")
-                break
-            
-            # Apply calibration transform if available
-            if config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None:
-                matrix = np.array(config["calibration"]["matrix"])
-                frame = apply_transform(frame, matrix, 100)  # Use default square size for transform
-            
-            # Draw the current selection
-            if ix != -1 and iy != -1:
-                if drawing:
-                    # Show selection rectangle while dragging
-                    cv2.rectangle(frame, (ix, iy), (fx, fy), (0, 255, 0), 2)
-                elif fx != -1 and fy != -1 and board_width > 0 and board_height > 0:
-                    # After dragging is complete, show the 8x8 grid
-                    draw_chessboard_grid(frame, ix, iy, board_width, board_height)
-            
-            # Show instructions
-            cv2.putText(frame, "Click and drag to select the chessboard", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, "Press 's' to save, 'r' to reset, 'q' to quit", (10, 60), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Display the frame
-            cv2.imshow('Chessboard Selection', frame)
-            
-            # Wait for key press
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('s'):
-                if board_width > 0 and board_height > 0:
-                    break
-                else:
-                    print("Please select the chessboard first")
-            elif key == ord('r'):
-                ix, iy = -1, -1
-                fx, fy = -1, -1
-                board_width = 0
-                board_height = 0
-            elif key == ord('q'):
-                cap.release()
-                cv2.destroyAllWindows()
-                return None, None, None
-        
-        # Clean up
-        cap.release()
-        cv2.destroyAllWindows()
-        
-        if board_width > 0 and board_height > 0:
-            # Calculate square size
-            square_size = min(board_width, board_height) // 8
-            return (ix, iy), (board_width, board_height), square_size
-        else:
-            return None, None, None
-            
-    except Exception as e:
-        print(f"Error in chessboard selection: {e}")
-        cap.release()
-        cv2.destroyAllWindows()
-        return None, None, None
+def save_board_states(session_dir: Path, board_states: List[Dict]):
+    """Save board states history."""
+    states_file = session_dir / "board.json"
+    with open(states_file, 'w') as f:
+        json.dump(board_states, f, indent=2)
 
 def main():
     """Main execution loop."""
     try:
-        # Create new session directory
-        session_dir = get_session_dir()
+        # Setup
+        session_dir = CAPTURES_DIR / f"game_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        session_dir.mkdir(exist_ok=True)
         print(f"\nStarting new game session in {session_dir.name}")
         
-        # Setup camera
-        cams = list_cameras()
-        if len(cams) < 2:
-            sys.exit("Second camera not found. Please ensure at least 2 cameras are connected.")
-        
-        # Use the second camera (index 1)
+        # Camera setup - specifically use camera index 1
         cam_idx = 1
+        cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            sys.exit(f"Camera {cam_idx} not found. Please ensure camera is connected.")
+        cap.release()
         print(f"Using camera {cam_idx}")
         
-        # Load config
+        # Load or create config
         config = load_config()
         
-        # Ask about calibration
-        if not config["camera"]["is_calibrated"]:
-            print("\nCamera is not calibrated.")
-            calibrate = input("Would you like to calibrate now? (y/n): ").lower().strip() == 'y'
-        else:
-            calibrate = input("\nCamera is already calibrated. Recalibrate? (y/n): ").lower().strip() == 'y'
-        
-        if calibrate:
-            print("\n=== Camera Calibration ===")
-            print("Please ensure the chessboard is well-lit and clearly visible.")
-            original_path, calibrated_path, _ = calibrate_from_camera(cam_idx, str(session_dir))
-            
-            if not calibrated_path:
-                print("Calibration was cancelled or failed. Using default camera settings.")
-            else:
-                print("Camera successfully calibrated!")
-                print(f"Calibration images saved to:\n- Original: {original_path}\n- Calibrated: {calibrated_path}")
-        
-        # Select chessboard and create grid
-        print("\n=== Chessboard Selection ===")
-        print("Please select the entire chessboard area.")
-        board_pos, board_size, square_size = select_chessboard(cam_idx, config)
-        
-        if board_pos is None or board_size is None or square_size is None:
-            print("Chessboard selection was cancelled. Using default values.")
-            board_pos = (0, 0)
-            board_size = (800, 800)
-            square_size = 100
-        
-        print(f"\nSelected chessboard at position {board_pos} with size {board_size}")
-        print(f"Square size: {square_size}px")
-        
-        # Initialize analyzer with selected board size
-        analyzer = SquareAnalyzer((8, 8), square_size)
-        print("Using square-based move detection")
-        
-        # Load existing moves and board states
+        # Initialize game state
+        board_state = INITIAL_BOARD.copy()
+        move_number = 1
+        is_white_move = True
         moves = []
-        board_states = load_board_states(session_dir)
-        board_state = board_states[-1]["board"].copy()  # Get latest state
-        moves_file = session_dir / "moves.json"
+        board_states = [{
+            "timestamp": datetime.now().isoformat(),
+            "move_number": 0,
+            "player": "initial",
+            "board": INITIAL_BOARD
+        }]
         
-        if moves_file.exists():
-            with open(moves_file, 'r') as f:
-                moves = json.load(f)
-        
-        move_number = len(moves) // 2 + 1  # Full moves (white + black)
-        is_white_move = len(moves) % 2 == 0  # True if it's white's turn
+        # Ask if user wants to configure
+        if config["camera"]["is_calibrated"]:
+            print("\nCurrent configuration exists. Would you like to:")
+            print("1. Use existing configuration")
+            print("2. Reconfigure camera and board")
+            choice = input("Enter choice (1 or 2): ").strip()
+            if choice == "2":
+                print("\nStarting configuration process...")
+                success, config = configure_board(cam_idx)
+                if not success:
+                    sys.exit("Board configuration failed.")
+        else:
+            print("\nNo configuration exists. Starting configuration process...")
+            success, config = configure_board(cam_idx)
+            if not success:
+                sys.exit("Board configuration failed.")
         
         # Print initial board state
         print_board(board_state)
         
-        # Capture initial board
-        print("\nCapturing initial board...")
-        initial_image = f"white_m{move_number}_initial.jpg" if is_white_move else f"black_m{move_number}_initial.jpg"
-        capture_board(cam_idx, str(session_dir / initial_image))
-        print("Initial board captured. Press Enter after opponent's move...")
-        input()
+        # Capture initial board state
+        print("\nCapturing initial board state...")
+        initial = capture_board(cam_idx, config)
+        initial_path = save_image(initial, str(session_dir / "initial_board"))
+        print("Initial board captured.")
         
         # Main game loop
         while True:
+            print(f"\nMove {move_number} - {'White' if is_white_move else 'Black'}'s turn")
+            print("Press Enter when the move is made...")
+            choice = input().lower().strip()
+            
+            if choice == 'exit':
+                print("\nExiting...")
+                break
+            elif choice == 'new':
+                print("\nStarting new game...")
+                main()
+                return
+            
             # Capture current board
             print("\nCapturing current board...")
-            current_image = f"white_m{move_number}_current.jpg" if is_white_move else f"black_m{move_number}_current.jpg"
-            capture_board(cam_idx, str(session_dir / current_image))
-            print("Current board captured.")
+            current = capture_board(cam_idx, config)
+            current_path = save_image(current, str(session_dir / f"{'white' if is_white_move else 'black'}_m{move_number}_current"))
             
-            try:
-                # Analyze changes
-                print("\nAnalyzing board state...")
-                move = analyzer.analyze_move(
-                    str(session_dir / initial_image),
-                    str(session_dir / current_image),
-                    board_state
-                )
-                
-                print("\n── Analysis ──")
-                print(f"Move Number: {move_number}")
-                print(f"Player: {'White' if is_white_move else 'Black'}")
-                print(f"Move: {move.move_notation}")
-                print(f"From: {move.from_square}")
-                print(f"To: {move.to_square}")
-                if move.captured_piece:
-                    print(f"Captured: {move.captured_piece} at {move.to_square}")
-                
-                # Update board state
-                board_state = update_board_state(board_state, move.model_dump())
-                
-                # Save board state
-                board_states.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "move_number": move_number,
-                    "player": "white" if is_white_move else "black",
-                    "board": board_state
-                })
-                save_board_states(session_dir, board_states)
-                
-                # Print updated board state
-                print_board(board_state)
-                
-                # Save move data
-                move_data = {
-                    "move_number": move_number,
-                    "player": "white" if is_white_move else "black",
-                    "timestamp": datetime.now().isoformat(),
-                    "initial_image": initial_image,
-                    "current_image": current_image,
-                    "move_notation": move.move_notation,
-                    "from_square": move.from_square,
-                    "to_square": move.to_square,
-                    "piece_type": move.piece_type,
-                    "piece_color": move.piece_color,
-                    "captured_piece": move.captured_piece
-                }
-                
-                moves.append(move_data)
-                save_moves(session_dir, moves)
-                
-            except ValueError as e:
-                print(f"\nError analyzing move: {e}")
-                print("Please try capturing the board again.")
-                continue
+            # Create diff image and analyze
+            print("\nAnalyzing move...")
+            diff = cv2.absdiff(initial, current)
+            diff_path = save_image(diff, str(session_dir / f"{'white' if is_white_move else 'black'}_m{move_number}_diff"))
+            
+            # Analyze move from diff
+            from_square, to_square = analyze_move_from_diff(diff, initial, current)
+            print(f"\nDetected move: {from_square} -> {to_square}")
+            
+            # Update board state
+            board_state = update_board_state(board_state, from_square.lower(), to_square.lower())
+            print_board(board_state)
+            
+            # Save move data
+            move_data = {
+                "move_number": move_number,
+                "player": "white" if is_white_move else "black",
+                "timestamp": datetime.now().isoformat(),
+                "from_square": from_square.lower(),
+                "to_square": to_square.lower(),
+                "current_image": str(Path(current_path).name)
+            }
+            moves.append(move_data)
+            save_moves(session_dir, moves)
+            
+            # Save board state
+            board_states.append({
+                "timestamp": datetime.now().isoformat(),
+                "move_number": move_number,
+                "player": "white" if is_white_move else "black",
+                "board": board_state
+            })
+            save_board_states(session_dir, board_states)
             
             # Update for next move
-            if not is_white_move:  # If black just moved, increment move number
+            if not is_white_move:
                 move_number += 1
-            is_white_move = not is_white_move  # Switch turns
-            initial_image = current_image
+            is_white_move = not is_white_move
+            initial = current  # Use current image as next initial state
             
-            # Prompt for next move or game end
+            print("\nImages saved successfully:")
+            print(f"- Current board: {current_path}")
+            print(f"- Diff image: {diff_path}")
+            print(f"- Move detection visualization: {str(CAPTURES_DIR / 'move_detection.jpg')}")
+            
             print("\nOptions:")
             print("1. Press Enter to continue to next move")
-            print("2. Type 'cal' to recalibrate camera")
-            print("3. Type 'new' to start a new game")
-            print("4. Type 'exit' to quit")
+            print("2. Type 'new' to start a new game")
+            print("3. Type 'exit' to quit")
             
             choice = input("\nYour choice: ").lower().strip()
-            if choice == 'new':
-                main()  # Start a new game
-                return
-            elif choice == 'exit':
+            if choice == 'exit':
                 print("\nExiting...")
-                sys.exit(0)
-            elif choice == 'cal':
-                print("\n=== Camera Recalibration ===")
-                original_path, calibrated_path, _ = calibrate_from_camera(cam_idx, str(session_dir))
-                if calibrated_path:
-                    print("Camera successfully recalibrated!")
-            # If Enter is pressed, continue with next move
+                break
+            elif choice == 'new':
+                print("\nStarting new game...")
+                main()
+                return
+        
+        print("\nProcess completed. Exiting...")
+        sys.exit(0)
     
     except KeyboardInterrupt:
         print("\nExiting...")
