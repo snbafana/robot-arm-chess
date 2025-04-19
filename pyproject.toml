@@ -8,6 +8,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "google-genai>=1.11.0",
     "google-generativeai>=0.8.5",
+    "instructor>=1.7.9",
     "openai>=1.75.0",
     "opencv-python>=4.11.0.86",
 ]
