@@ -669,6 +669,58 @@ def analyze_move_from_diff(diff_image: np.ndarray, initial_image: np.ndarray, cu
     
     return from_square, to_square
 
+def chess_notation_to_original_pixel(square_notation: str, config: Dict) -> Tuple[int, int]:
+    """Convert chess square notation to pixel coordinates in the original camera frame.
+    
+    Args:
+        square_notation: Chess notation (e.g., 'A4', 'e5')
+        config: Camera and board configuration dictionary
+    
+    Returns:
+        Tuple of (x, y) pixel coordinates in the original camera frame
+    """
+    # Normalize notation (convert to lowercase for consistency)
+    square_notation = square_notation.lower()
+    file_char = square_notation[0]
+    rank = int(square_notation[1])
+    
+    # Convert to grid coordinates (zero-indexed)
+    file_idx = ord(file_char) - ord('a')  # 'a' -> 0, 'b' -> 1, etc.
+    rank_idx = rank - 1                   # 1 -> 0, 2 -> 1, etc.
+    
+    # Get square dimensions
+    square_size = config["board"]["square_size"]
+    
+    # Calculate center coordinates in the warped/transformed frame
+    # Note: In our transformed view, files are vertical (A-H) and ranks are horizontal (1-8)
+    warped_x = rank_idx * square_size + square_size // 2
+    warped_y = file_idx * square_size + square_size // 2
+    
+    # If we need to apply the board position offset (if board selection was saved)
+    if "position" in config["board"] and config["board"]["position"] is not None:
+        board_x, board_y = config["board"]["position"]
+        warped_x += board_x
+        warped_y += board_y
+    
+    # Reverse the perspective transform to get original image coordinates
+    if config["camera"]["is_calibrated"] and config["calibration"]["matrix"] is not None:
+        # Get perspective transform matrix and create its inverse
+        perspective_matrix = np.array(config["calibration"]["matrix"])
+        inverse_perspective = np.linalg.inv(perspective_matrix)
+        
+        # Apply inverse perspective transform to get original coordinates
+        original_coords = cv2.perspectiveTransform(
+            np.array([[[warped_x, warped_y]]], dtype=np.float32),
+            inverse_perspective
+        )
+        
+        # Extract coordinates
+        original_x, original_y = original_coords[0][0]
+        return int(original_x), int(original_y)
+    
+    # If no transform applied, return warped coordinates
+    return warped_x, warped_y
+
 def print_board(board_state: Dict):
     """Print the current board state in ASCII format."""
     print("\nCurrent Board State:")
@@ -721,6 +773,83 @@ def save_board_states(session_dir: Path, board_states: List[Dict]):
     states_file = session_dir / "board.json"
     with open(states_file, 'w') as f:
         json.dump(board_states, f, indent=2)
+
+def export_game_positions(session_dir: Path, fen_history: List[str]) -> str:
+    """Export game positions to a PGN file."""
+    return export_position_history(session_dir, fen_history)
+
+def get_stockfish_move_target_pixel(best_move: str, config: Dict) -> Tuple[int, int]:
+    """Get the target pixel coordinates for a move returned by Stockfish.
+    
+    Args:
+        best_move: Chess move in UCI format (e.g., 'e2e4', 'g1f3')
+        config: Camera and board configuration dictionary
+    
+    Returns:
+        Tuple of (x, y) pixel coordinates in the original camera frame for the target square
+    """
+    # UCI format is like 'e2e4', where 'e4' is the target
+    if len(best_move) >= 4:
+        target_square = best_move[2:4]
+        return chess_notation_to_original_pixel(target_square, config)
+    # Return default center if invalid move format
+    return None
+
+def get_move_coordinates(chess_move: str, config: Dict) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Get both source and target pixel coordinates for a chess move in the original camera frame.
+    
+    Args:
+        chess_move: Chess move in either UCI format (e.g., 'e2e4') or SAN format (e.g., 'Nf3')
+        config: Camera and board configuration dictionary
+    
+    Returns:
+        Tuple of ((source_x, source_y), (target_x, target_y)) pixel coordinates
+        in the original camera frame
+    """
+    from shadow_board import sync_shadow_board
+    
+    # Check if we have a valid move format
+    if not chess_move or len(chess_move) < 2:
+        return None, None
+    
+    # Stockfish can return moves in different formats:
+    # 1. UCI format (e.g., "e2e4") - direct source and target
+    # 2. SAN format (e.g., "Nf3") - algebraic notation that requires board context
+    
+    # Case 1: UCI format (length 4 or 5 with promotion, e.g., "e7e8q")
+    if len(chess_move) >= 4 and chess_move[0].islower() and chess_move[1].isdigit():
+        # Extract source and target squares directly
+        source_square = chess_move[0:2]
+        target_square = chess_move[2:4]
+    
+    # Case 2: SAN format (e.g., "Nf3", "exd5", "O-O")
+    else:
+        # For SAN format, we need the current board state to determine the source square
+        # This is a simplified implementation that might need to be expanded
+        print(f"Warning: Move '{chess_move}' appears to be in SAN format, which requires current board state.")
+        print("Using target square only. Source coordinates will be None.")
+        
+        # Try to extract the target square from SAN notation
+        # This is a simplified approach - in a real implementation, you'd use a chess library
+        # For common piece moves like Nf3, the last two characters are often the target
+        if len(chess_move) >= 2 and chess_move[-2].islower() and chess_move[-1].isdigit():
+            target_square = chess_move[-2:]
+            source_square = None
+        elif "O-O-O" in chess_move:  # Queenside castling
+            target_square = "c1" if chess_move.isupper() else "c8"  # White or Black
+            source_square = None
+        elif "O-O" in chess_move:    # Kingside castling
+            target_square = "g1" if chess_move.isupper() else "g8"  # White or Black
+            source_square = None
+        else:
+            # Can't determine the target square reliably
+            return None, None
+    
+    # Get pixel coordinates for both squares
+    source_pixel = chess_notation_to_original_pixel(source_square, config) if source_square else None
+    target_pixel = chess_notation_to_original_pixel(target_square, config)
+    
+    return source_pixel, target_pixel
 
 def main():
     """Main execution loop."""
@@ -844,6 +973,51 @@ def main():
             analysis = analyze_position_with_stockfish(shadow_board.fen())
             if analysis:
                 print_stockfish_analysis(analysis, shadow_board)
+                
+                # If there's a best move, visualize it on the current board
+                if 'best_move' in analysis and analysis['best_move']:
+                    best_move = analysis['best_move']
+                    source_pixel, target_pixel = get_move_coordinates(best_move, config)
+                    
+                    if target_pixel:  # We at least need the target
+                        # Create a copy of the current image for visualization
+                        vis_image = current.copy()
+                        
+                        # If we have source coordinates, draw the complete move
+                        if source_pixel:
+                            source_x, source_y = source_pixel
+                            target_x, target_y = target_pixel
+                            
+                            # Draw circle at source position (green with cyan border)
+                            cv2.circle(vis_image, (source_x, source_y), 15, (0, 255, 0), -1)
+                            cv2.circle(vis_image, (source_x, source_y), 15, (255, 255, 0), 2)
+                            
+                            # Draw arrow from source to target
+                            cv2.arrowedLine(vis_image, (source_x, source_y), (target_x, target_y),
+                                           (255, 255, 0), 2, cv2.LINE_AA, tipLength=0.2)
+                            
+                            # Print source coordinates for robot arm
+                            print(f"Source coordinates: {source_pixel}")
+                        else:
+                            # Just have target coordinates
+                            target_x, target_y = target_pixel
+                            print("Source coordinates: Not available (SAN notation)")
+                        
+                        # Draw circle at target position (red with yellow border)
+                        cv2.circle(vis_image, (target_x, target_y), 15, (0, 0, 255), -1)
+                        cv2.circle(vis_image, (target_x, target_y), 15, (0, 255, 255), 2)
+                        
+                        # Add text showing the best move
+                        cv2.putText(vis_image, f"Best move: {best_move}", 
+                                   (10, vis_image.shape[0] - 20),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                        
+                        # Save the visualization
+                        target_vis_path = save_image(vis_image, str(session_dir / f"{'white' if is_white_move else 'black'}_m{move_number}_best_move"))
+                        print(f"- Best move visualization: {target_vis_path}")
+                        
+                        # Print target coordinates for robot arm
+                        print(f"Target coordinates: {target_pixel}")
             
             # Update for next move
             if not is_white_move:
