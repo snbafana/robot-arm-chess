@@ -4,7 +4,7 @@ chess_vision.py
 Capture and analyze chess moves using computer vision and AI with structured outputs.
 Supports both OpenAI and Gemini models.
 """
-import cv2, base64, os, sys, json
+import cv2, base64, os, sys, json, chess
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,11 @@ from google import genai
 import instructor
 from dotenv import load_dotenv
 from calibrate_board import calibrate_from_camera, load_config, apply_transform
+import websocket
+
+# Import shadow board and stockfish modules
+from src.shadow_board import sync_shadow_board, save_fen_history, load_fen_history, export_game_positions
+from stockfish_api import analyze_position_with_stockfish, print_stockfish_analysis
 
 # Setup
 load_dotenv()
@@ -218,7 +223,16 @@ def load_moves(session_dir):
                     # as it was overwritten by the moving piece
                     pass
     
-    return moves, board_state
+    # Create shadow_board from board_state
+    shadow_board = sync_shadow_board(board_state)
+    
+    # If moves exist, try to determine whose turn it is
+    if moves and len(moves) > 0:
+        last_move = moves[-1]
+        # Set turn to opposite of last move's color
+        shadow_board.turn = chess.BLACK if last_move["piece_color"] == "white" else chess.WHITE
+    
+    return moves, board_state, shadow_board
 
 def save_moves(session_dir, moves):
     """Save move history."""
@@ -610,20 +624,29 @@ def main():
         print(f"Using {provider.upper()} for analysis")
         
         # Load existing moves and board states
-        moves = []
+        moves, board_state, shadow_board = load_moves(session_dir)
         board_states = load_board_states(session_dir)
-        board_state = board_states[-1]["board"].copy()  # Get latest state
-        moves_file = session_dir / "moves.json"
+        fen_history = load_fen_history(session_dir)
         
-        if moves_file.exists():
-            with open(moves_file, 'r') as f:
-                moves = json.load(f)
+        if not moves:
+            # If no moves were loaded, initialize FEN history with current position
+            fen_history = [shadow_board.fen()]
         
         move_number = len(moves) // 2 + 1  # Full moves (white + black)
         is_white_move = len(moves) % 2 == 0  # True if it's white's turn
         
         # Print initial board state
         print_board(board_state)
+        print("\nCurrent board position (FEN notation):")
+        print(shadow_board.fen())
+        print("\nCurrent board position (visual):")
+        print(shadow_board)
+        
+        # Initial Stockfish analysis
+        print("\nAnalyzing initial position with Stockfish...")
+        stockfish_analysis = analyze_position_with_stockfish(shadow_board.fen())
+        if stockfish_analysis:
+            print_stockfish_analysis(stockfish_analysis, shadow_board)
         
         # Capture initial board
         print("\nCapturing initial board...")
@@ -659,6 +682,107 @@ def main():
             
             # Update board state
             board_state = update_board_state(board_state, move.model_dump())
+            
+            # Update shadow_board with the detected move
+            try:
+                # Try to convert the move to UCI format for the chess library
+                from_square = chess.parse_square(move.from_square)
+                to_square = chess.parse_square(move.to_square)
+                
+                # Check for special moves
+                chess_move = None
+                
+                # Check for castling (king moves two squares)
+                if move.piece_type == "king":
+                    # Kingside castling
+                    if move.from_square == "e1" and move.to_square == "g1":
+                        chess_move = chess.Move.from_uci("e1g1")  # White kingside
+                    elif move.from_square == "e8" and move.to_square == "g8":
+                        chess_move = chess.Move.from_uci("e8g8")  # Black kingside
+                    # Queenside castling
+                    elif move.from_square == "e1" and move.to_square == "c1":
+                        chess_move = chess.Move.from_uci("e1c1")  # White queenside
+                    elif move.from_square == "e8" and move.to_square == "c8":
+                        chess_move = chess.Move.from_uci("e8c8")  # Black queenside
+                
+                # Check for pawn promotion
+                if move.piece_type in ["queen", "rook", "bishop", "knight"] and move.move_notation and "=" in move.move_notation:
+                    # Get promotion piece from notation
+                    promotion_piece = move.move_notation.split("=")[1][0].lower()
+                    promotion_map = {"q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT}
+                    if promotion_piece in promotion_map:
+                        chess_move = chess.Move(from_square, to_square, promotion=promotion_map[promotion_piece])
+                
+                # Default move if not a special move
+                if chess_move is None:
+                    chess_move = chess.Move(from_square, to_square)
+                
+                # Try the parsed move first
+                if chess_move in shadow_board.legal_moves:
+                    shadow_board.push(chess_move)
+                    print("\nMove applied to shadow_board successfully!")
+                else:
+                    # If not successful, try to parse the SAN notation if available
+                    try:
+                        if move.move_notation:
+                            san_move = shadow_board.parse_san(move.move_notation)
+                            shadow_board.push(san_move)
+                            print("\nMove applied from SAN notation successfully!")
+                        else:
+                            raise ValueError("No SAN notation available")
+                    except ValueError:
+                        # As a last resort, try to find a legal move between the squares
+                        legal_moves = list(shadow_board.legal_moves)
+                        matching_moves = [m for m in legal_moves if 
+                                        m.from_square == from_square and 
+                                        m.to_square == to_square]
+                        
+                        if matching_moves:
+                            shadow_board.push(matching_moves[0])
+                            print("\nMove applied from matching squares!")
+                        else:
+                            # If all else fails, resync the board
+                            print("\nWarning: Move not legal in shadow_board, resyncing...")
+                            shadow_board = sync_shadow_board(board_state)
+                            # Set the correct turn
+                            shadow_board.turn = chess.BLACK if is_white_move else chess.WHITE
+                
+                print("\nCurrent board position (FEN notation):")
+                print(shadow_board.fen())
+                
+                print("\nCurrent board position (visual):")
+                print(shadow_board)
+                
+                # Add FEN to history
+                fen_history.append(shadow_board.fen())
+                save_fen_history(session_dir, fen_history)
+                
+                # Check for game-ending conditions
+                if shadow_board.is_checkmate():
+                    winner = "Black" if shadow_board.turn == chess.WHITE else "White"
+                    print(f"\n🏆 CHECKMATE! {winner} wins!")
+                elif shadow_board.is_stalemate():
+                    print("\n🤝 STALEMATE! Game is drawn.")
+                elif shadow_board.is_insufficient_material():
+                    print("\n🤝 DRAW DUE TO INSUFFICIENT MATERIAL!")
+                elif shadow_board.can_claim_fifty_moves():
+                    print("\n🤝 FIFTY-MOVE RULE can be claimed.")
+                elif shadow_board.can_claim_threefold_repetition():
+                    print("\n🤝 THREEFOLD REPETITION can be claimed.")
+                
+                if shadow_board.is_check():
+                    print("\n⚠️ CHECK!")
+                
+                # Get Stockfish analysis for the current position
+                print("\nAnalyzing position with Stockfish...")
+                stockfish_analysis = analyze_position_with_stockfish(shadow_board.fen())
+                if stockfish_analysis:
+                    print_stockfish_analysis(stockfish_analysis, shadow_board)
+                
+            except Exception as e:
+                print(f"\nError updating shadow_board: {e}")
+                # Resync as a fallback
+                shadow_board = sync_shadow_board(board_state)
             
             # Save board state
             board_states.append({
@@ -703,6 +827,7 @@ def main():
             print("2. Type 'cal' to recalibrate camera")
             print("3. Type 'new' to start a new game")
             print("4. Type 'exit' to quit")
+            print("5. Type 'export' to export the game positions in FEN notation")
             
             choice = input("\nYour choice: ").lower().strip()
             if choice == 'new':
@@ -715,6 +840,9 @@ def main():
                 original_path, calibrated_path, _ = calibrate_from_camera(cam_idx, str(session_dir))
                 if calibrated_path:
                     print("Camera successfully recalibrated!")
+            elif choice == 'export':
+                export_file = export_game_positions(session_dir, fen_history)
+                print(f"Game exported to {export_file}")
             # If Enter is pressed, continue with next move
         
     except KeyboardInterrupt:

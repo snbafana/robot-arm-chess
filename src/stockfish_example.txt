@@ -1,0 +1,92 @@
+import asyncio
+import json
+import websockets
+import argparse
+
+class ChessAPIClient:
+    def __init__(self, url='wss://chess-api.com/v1'):
+        self.url = url
+        self.websocket = None
+
+    async def connect(self):
+        """Establish a WebSocket connection to the chess API."""
+        self.websocket = await websockets.connect(self.url)
+        print(f"Connected to {self.url}")
+
+    async def analyze_position(self, fen, variants=1, depth=12, max_thinking_time=50):
+        """Send a FEN position for analysis and receive responses."""
+        if not self.websocket:
+            await self.connect()
+        
+        # Prepare the request
+        request = {
+            "fen": fen,
+            "variants": variants,
+            "depth": depth,
+            "maxThinkingTime": max_thinking_time
+        }
+        
+        # Send the request
+        await self.websocket.send(json.dumps(request))
+        print(f"Sent request: {json.dumps(request, indent=2)}")
+        print("\nReceiving analysis...\n")
+        
+        # Listen for responses
+        while True:
+            try:
+                response = await self.websocket.recv()
+                data = json.loads(response)
+                
+                # Format the response for better readability
+                if data.get("type") == "move":
+                    print(f"Progress: {data.get('text', '')} [Depth: {data.get('depth', '')}]")
+                elif data.get("type") == "bestmove":
+                    print("\n--- BEST MOVE ---")
+                    print(f"Move: {data.get('text', '')}")
+                    print(f"Evaluation: {data.get('eval', '')}")
+                    print(f"Depth: {data.get('depth', '')}")
+                    print(f"Win chance: {data.get('winChance', '')}%")
+                    print(f"From-To: {data.get('from', '')}-{data.get('to', '')}")
+                    if data.get("continuationArr"):
+                        print(f"Continuation: {' '.join(data.get('continuationArr', []))}")
+                    break
+                elif data.get("type") == "info":
+                    print(f"Info: {data.get('text', '')}")
+            except websockets.exceptions.ConnectionClosed:
+                print("Connection closed")
+                break
+    
+    async def close(self):
+        """Close the WebSocket connection."""
+        if self.websocket:
+            await self.websocket.close()
+            print("Connection closed")
+
+async def main():
+    parser = argparse.ArgumentParser(description='Chess API WebSocket Client')
+    parser.add_argument('--fen', type=str, 
+                        default='rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+                        help='FEN position to analyze')
+    parser.add_argument('--variants', type=int, default=1, 
+                        help='Number of variants to analyze (max 5)')
+    parser.add_argument('--depth', type=int, default=12,
+                        help='Analysis depth (max 18)')
+    parser.add_argument('--time', type=int, default=50,
+                        help='Max thinking time in ms (max 100)')
+    
+    args = parser.parse_args()
+    
+    client = ChessAPIClient()
+    try:
+        await client.connect()
+        await client.analyze_position(
+            fen=args.fen,
+            variants=args.variants,
+            depth=args.depth,
+            max_thinking_time=args.time
+        )
+    finally:
+        await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main()) 

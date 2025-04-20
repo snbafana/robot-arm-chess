@@ -5,10 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "chess>=1.11.2",
     "dotenv>=0.9.9",
     "google-genai>=1.11.0",
     "google-generativeai>=0.8.5",
     "instructor>=1.7.9",
     "openai>=1.75.0",
     "opencv-python>=4.11.0.86",
+    "websocket>=0.2.1",
 ]
