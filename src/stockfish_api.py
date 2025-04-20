@@ -4,18 +4,89 @@ stockfish_api.py
 Stockfish chess engine API integration.
 Provides functions for analyzing chess positions using Stockfish via WebSocket.
 """
-import websocket
+import asyncio
+import websockets
 import json
-import threading
-import uuid
-import time
 import chess
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Union
 
-def analyze_position_with_stockfish(fen: str, depth: int = 12) -> Optional[Dict]:
+class ChessAPIClient:
+    def __init__(self, url='wss://chess-api.com/v1'):
+        self.url = url
+        self.websocket = None
+
+    async def connect(self):
+        """Establish a WebSocket connection to the chess API."""
+        self.websocket = await websockets.connect(self.url)
+        return self.websocket is not None
+
+    async def analyze_position(self, fen: str, depth: int = 12, 
+                              variants: int = 1, max_thinking_time: int = 50) -> Optional[Dict]:
+        """
+        Send a FEN position for analysis and receive responses.
+        
+        Args:
+            fen: FEN notation of the position
+            depth: Analysis depth (1-18)
+            variants: Number of variants to analyze (max 5)
+            max_thinking_time: Maximum thinking time in ms (max 100)
+            
+        Returns:
+            Dictionary with analysis results or None if failed
+        """
+        try:
+            if not self.websocket:
+                await self.connect()
+            
+            # Prepare the request
+            request = {
+                "fen": fen,
+                "variants": min(5, variants),
+                "depth": min(18, depth),
+                "maxThinkingTime": min(100, max_thinking_time)
+            }
+            
+            # Send the request
+            await self.websocket.send(json.dumps(request))
+            
+            # Wait for response(s)
+            best_move = None
+            
+            # Listen for responses
+            while True:
+                try:
+                    response = await self.websocket.recv()
+                    data = json.loads(response)
+                    
+                    # If this is a "bestmove" response, use it and break
+                    if data.get("type") == "bestmove":
+                        best_move = data
+                        break
+                    
+                    # Otherwise keep the latest response
+                    best_move = data
+                    
+                    # If we've reached the desired depth, break
+                    if data.get("depth", 0) >= depth:
+                        break
+                        
+                except websockets.exceptions.ConnectionClosed:
+                    break
+            
+            return best_move
+        
+        except Exception as e:
+            print(f"Error analyzing position with Stockfish: {e}")
+            return None
+    
+    async def close(self):
+        """Close the WebSocket connection."""
+        if self.websocket:
+            await self.websocket.close()
+
+async def analyze_position_with_stockfish_async(fen: str, depth: int = 12) -> Optional[Dict]:
     """
-    Analyze a chess position using the Stockfish API.
-    Simple function version that doesn't maintain a persistent connection.
+    Analyze a chess position using the Stockfish API asynchronously.
     
     Args:
         fen: FEN notation of the position
@@ -24,49 +95,27 @@ def analyze_position_with_stockfish(fen: str, depth: int = 12) -> Optional[Dict]
     Returns:
         Dictionary with analysis results or None if failed
     """
+    client = ChessAPIClient()
     try:
-        # Create WebSocket connection
-        ws = websocket.create_connection('wss://chess-api.com/v1')
-        
-        # Prepare and send the request
-        request = {
-            'fen': fen,
-            'depth': min(18, depth)
-        }
-        ws.send(json.dumps(request))
-        
-        # Wait for response(s)
-        best_move = None
-        wait_time = 0
-        max_wait = 10  # Maximum wait time in seconds
-        
-        while wait_time < max_wait:
-            response = ws.recv()
-            data = json.loads(response)
-            
-            # If this is a "bestmove" response, use it
-            if data.get('type') == 'bestmove':
-                best_move = data
-                break
-            
-            # Otherwise keep the latest response
-            best_move = data
-            
-            # If we've reached the desired depth, break
-            if data.get('depth') >= depth:
-                break
-                
-            time.sleep(0.5)
-            wait_time += 0.5
-        
-        # Close connection
-        ws.close()
-        
-        return best_move
+        await client.connect()
+        result = await client.analyze_position(fen=fen, depth=depth)
+        return result
+    finally:
+        await client.close()
+
+def analyze_position_with_stockfish(fen: str, depth: int = 12) -> Optional[Dict]:
+    """
+    Analyze a chess position using the Stockfish API.
+    Synchronous wrapper around the async function.
     
-    except Exception as e:
-        print(f"Error analyzing position with Stockfish: {e}")
-        return None
+    Args:
+        fen: FEN notation of the position
+        depth: Analysis depth (1-18)
+        
+    Returns:
+        Dictionary with analysis results or None if failed
+    """
+    return asyncio.run(analyze_position_with_stockfish_async(fen, depth))
 
 def print_stockfish_analysis(analysis: Dict, shadow_board: chess.Board):
     """
@@ -81,14 +130,14 @@ def print_stockfish_analysis(analysis: Dict, shadow_board: chess.Board):
         return
     
     eval_score = analysis.get('eval')
-    best_move = analysis.get('san')
+    best_move = analysis.get('text') or analysis.get('san')
     win_chance = analysis.get('winChance')
     
     print("\n🧠 Stockfish Analysis:")
     print(f"Evaluation: {eval_score}")
-    if eval_score > 0:
+    if eval_score and eval_score > 0:
         print(f"White has an advantage of {abs(eval_score)} pawns")
-    elif eval_score < 0:
+    elif eval_score and eval_score < 0:
         print(f"Black has an advantage of {abs(eval_score)} pawns")
     else:
         print("Position is equal")
